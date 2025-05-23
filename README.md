@@ -25,3 +25,42 @@
         Почему: Это диаграмма, которая показывает статическую структуру системы: основные классы, их атрибуты (данные), методы (поведение) и связи между ними (ассоциации, наследование, агрегация).
 
   ![Untitled](https://github.com/user-attachments/assets/a33ea1b5-8be2-4f39-9755-d3e95e68ed40)
+
+
+
+# Структура Базы Данных
+
+Для хранения данных приложения "ModuleHub" используется реляционная база данных: PostgreSQL. Схема базы данных спроектирована для эффективного хранения информации о пользователях, модулях, их версиях, отзывах, категориях, тегах и отчетах о совместимости.
+
+Ключевые сущности и их таблицы:
+* **Roles**
+  * Описание: Хранит предопределенные роли пользователей в системе.
+  * Ключевые поля: RoleID (PK), RoleName.
+  * Пример ролей: "EndUser", "Developer", "Moderator".
+* **Users**
+  * Описание: Основная таблица для хранения информации о всех зарегистрированных пользователях.
+  * Ключевые поля: UserID (PK), Username, Email, PasswordHash, RegistrationDate, RoleID (FK к Roles).
+* **DeveloperProfiles**
+  * Описание: Дополнительная информация для пользователей с ролью "Разработчик". Реализует связь "один-к-одному" с таблицей Users.
+  * Ключевые поля: UserID (PK, FK к Users), Bio, WebsiteUrl.
+* **ModuleCategories**
+  * Описание: Определяет категории, к которым могут принадлежать Magisk-модули (например, "Твики UI", "Производительность", "Звук").
+  * Ключевые поля: CategoryID (PK), CategoryName, Description.
+* **Modules**
+  * Описание: Центральная таблица, хранящая информацию о самих Magisk-модулях.
+  * Ключевые поля: ModuleID (PK), Name, Description, AuthorUserID (FK к Users), CategoryID (FK к ModuleCategories), IsVerified, CreationDate, LastUpdateDate.
+* **ModuleVersions**
+  * Описание: Хранит информацию о различных версиях каждого модуля, включая ссылку на скачивание и список изменений.
+  * Ключевые поля: VersionID (PK), ModuleID (FK к Modules), VersionString, Changelog, DownloadLink, MinMagiskVersion, FileSizeMB, UploadDate.
+* **Reviews**
+  * Описание: Содержит отзывы и оценки, оставленные пользователями для конкретных модулей.
+  * Ключевые поля: ReviewID (PK), ModuleID (FK к Modules), UserID (FK к Users), Rating, CommentText, ReviewDate, IsEdited.
+* **Compatibility**
+  * Описание: Позволяет пользователям сообщать о совместимости определенной версии модуля с их устройством и версией Android.
+  * Ключевые поля: ReportID (PK), ModuleVersionID (FK к ModuleVersions), UserID (FK к Users), DeviceModel, AndroidVersion, WorksStatus, UserNotes, ReportDate.
+* **Tags**
+  * Описание: Хранит список тегов, которые можно присваивать модулям для более гибкой классификации и поиска (например, "Xposed", "SafetyNet Bypass").
+  * Ключевые поля: TagID (PK), TagName.
+* **ModuleTags**
+  * Описание: Связующая таблица для реализации связи "многие-ко-многим" между модулями и тегами. Каждый модуль может иметь несколько тегов, и каждый тег может быть применен к нескольким модулям.
+  * Ключевые поля: ModuleID (PK, FK к Modules), TagID (PK, FK к Tags).
