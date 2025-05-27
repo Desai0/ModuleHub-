@@ -1171,11 +1171,13 @@ class Program
             string downloadLink = Console.ReadLine();
             Console.Write("Changelog (можно оставить пустым): ");
             string changelog = Console.ReadLine();
+            Console.Write("Минимальная версия Magisk (FE: 28000): ");
+            string minMagiskVersion = Console.ReadLine();
 
 
-            if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(description) || string.IsNullOrWhiteSpace(versionString) || string.IsNullOrWhiteSpace(downloadLink))
+            if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(description) || string.IsNullOrWhiteSpace(versionString) || string.IsNullOrWhiteSpace(downloadLink) || string.IsNullOrWhiteSpace(minMagiskVersion))
             {
-                Console.WriteLine("Название, описание, версия и ссылка на скачивание обязательны."); return;
+                Console.WriteLine("Название, описание, версия, версия Magisk и ссылка на скачивание обязательны."); return;
             }
 
             var newModule = new Module
@@ -1195,9 +1197,9 @@ class Program
                 VersionString = versionString,
                 DownloadLink = downloadLink,
                 Changelog = changelog,
-                UploadDate = DateTime.UtcNow
+                UploadDate = DateTime.UtcNow,
+                MinMagiskVersion = minMagiskVersion
             };
-            // newModule.Versions.Add(newVersion); // Можно и так, но EF Core разберется при добавлении newModule с вложенной версией
 
             try
             {
@@ -1243,10 +1245,12 @@ class Program
             string downloadLink = Console.ReadLine();
             Console.Write("Changelog: ");
             string changelog = Console.ReadLine();
+            Console.Write("Минимальная версия Magisk (FE: 28001) ");
+            string minMagiskVersion = Console.ReadLine();
 
-            if (string.IsNullOrWhiteSpace(versionString) || string.IsNullOrWhiteSpace(downloadLink))
+            if (string.IsNullOrWhiteSpace(versionString) || string.IsNullOrWhiteSpace(downloadLink) || string.IsNullOrWhiteSpace(minMagiskVersion))
             {
-                Console.WriteLine("Версия и ссылка на скачивание обязательны."); return;
+                Console.WriteLine("Версия, версия Magisk и ссылка на скачивание обязательны."); return;
             }
 
             var newVersion = new ModuleVersion
@@ -1255,7 +1259,8 @@ class Program
                 VersionString = versionString,
                 DownloadLink = downloadLink,
                 Changelog = changelog,
-                UploadDate = DateTime.UtcNow
+                UploadDate = DateTime.UtcNow,
+                MinMagiskVersion = minMagiskVersion
             };
 
             try
