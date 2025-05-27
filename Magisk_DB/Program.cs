@@ -463,12 +463,376 @@ class Program
             case "D2": if (_currentUser.Role.RoleName == "Developer") AddVersionToMyModule(); else Console.WriteLine("Доступ запрещен."); break;
             case "D3": if (_currentUser.Role.RoleName == "Developer") ViewMyModules(); else Console.WriteLine("Доступ запрещен."); break;
             case "M1": if (_currentUser.Role.RoleName == "Moderator") VerifyModule(); else Console.WriteLine("Доступ запрещен."); break;
+            case "M2": if (_currentUser.Role.RoleName == "Moderator") ManageCategoriesMenu(); else Console.WriteLine("Доступ запрещен."); break;
+            case "M3": if (_currentUser.Role.RoleName == "Moderator") ManageTagsMenu(); else Console.WriteLine("Доступ запрещен."); break;
             // TODO: M2, M3
             case "9": LogoutUser(); break;
             case "0": Environment.Exit(0); break;
             default: Console.WriteLine("Неверный ввод."); break;
         }
     }
+    // --- УПРАВЛЕНИЕ КАТЕГОРИЯМИ (ДЛЯ МОДЕРАТОРА) ---
+
+    static void ManageCategoriesMenu()
+    {
+        while (true)
+        {
+            Console.WriteLine("\n--- Управление категориями ---");
+            Console.WriteLine("1. Показать все категории");
+            Console.WriteLine("2. Добавить новую категорию");
+            Console.WriteLine("3. Редактировать категорию");
+            Console.WriteLine("4. Удалить категорию");
+            Console.WriteLine("0. Назад в главное меню");
+            Console.Write("Выберите опцию: ");
+            string choice = Console.ReadLine();
+
+            switch (choice)
+            {
+                case "1": ListAllCategories(); break;
+                case "2": AddNewCategory(); break;
+                case "3": EditCategory(); break;
+                case "4": DeleteCategory(); break;
+                case "0": return; // Возврат в предыдущее меню
+                default: Console.WriteLine("Неверный ввод."); break;
+            }
+        }
+    }
+
+    static void ListAllCategories()
+    {
+        using (var context = new MagiskHubContext(_dbContextOptions))
+        {
+            var categories = context.ModuleCategories.ToList();
+            if (!categories.Any())
+            {
+                Console.WriteLine("Категорий пока нет.");
+                return;
+            }
+            Console.WriteLine("\n--- Список категорий ---");
+            foreach (var cat in categories)
+            {
+                Console.WriteLine($"ID: {cat.CategoryID}, Название: {cat.CategoryName}, Описание: {cat.Description ?? "N/A"}");
+            }
+        }
+    }
+
+    static void AddNewCategory()
+    {
+        Console.Write("Введите название новой категории: ");
+        string name = Console.ReadLine();
+        Console.Write("Введите описание категории (необязательно): ");
+        string description = Console.ReadLine();
+
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            Console.WriteLine("Название категории не может быть пустым.");
+            return;
+        }
+
+        using (var context = new MagiskHubContext(_dbContextOptions))
+        {
+            if (context.ModuleCategories.Any(mc => mc.CategoryName.ToLower() == name.ToLower()))
+            {
+                Console.WriteLine("Категория с таким названием уже существует.");
+                return;
+            }
+
+            var newCategory = new ModuleCategory { CategoryName = name, Description = description };
+            try
+            {
+                context.ModuleCategories.Add(newCategory);
+                context.SaveChanges();
+                Console.WriteLine($"Категория '{name}' успешно добавлена.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Ошибка при добавлении категории: {ex.Message}");
+            }
+        }
+    }
+
+    static void EditCategory()
+    {
+        ListAllCategories(); // Показать список для удобства выбора ID
+        Console.Write("Введите ID категории для редактирования: ");
+        if (!int.TryParse(Console.ReadLine(), out int categoryId))
+        {
+            Console.WriteLine("Некорректный ID."); return;
+        }
+
+        using (var context = new MagiskHubContext(_dbContextOptions))
+        {
+            var category = context.ModuleCategories.Find(categoryId);
+            if (category == null)
+            {
+                Console.WriteLine("Категория с таким ID не найдена."); return;
+            }
+
+            Console.Write($"Новое название для '{category.CategoryName}' (оставьте пустым, чтобы не менять): ");
+            string newName = Console.ReadLine();
+            Console.Write($"Новое описание для '{category.CategoryName}' (оставьте пустым, чтобы не менять): ");
+            string newDescription = Console.ReadLine();
+
+            bool changed = false;
+            if (!string.IsNullOrWhiteSpace(newName) && newName != category.CategoryName)
+            {
+                // Проверка на уникальность нового имени, если оно меняется
+                if (context.ModuleCategories.Any(mc => mc.CategoryName.ToLower() == newName.ToLower() && mc.CategoryID != categoryId))
+                {
+                    Console.WriteLine("Категория с таким новым названием уже существует.");
+                    return;
+                }
+                category.CategoryName = newName;
+                changed = true;
+            }
+            if (!string.IsNullOrWhiteSpace(newDescription) && newDescription != category.Description)
+            {
+                category.Description = newDescription;
+                changed = true;
+            }
+            // Можно было бы и пустую строку в описание разрешить, если оно было не пустым
+            if (string.IsNullOrWhiteSpace(newDescription) && !string.IsNullOrWhiteSpace(category.Description))
+            {
+                category.Description = null; // Если пользователь ввел пустое, а было что-то - очищаем
+                changed = true;
+            }
+
+
+            if (changed)
+            {
+                try
+                {
+                    context.SaveChanges();
+                    Console.WriteLine("Категория успешно обновлена.");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Ошибка при обновлении категории: {ex.Message}");
+                }
+            }
+            else
+            {
+                Console.WriteLine("Нет изменений для сохранения.");
+            }
+        }
+    }
+
+    static void DeleteCategory()
+    {
+        ListAllCategories();
+        Console.Write("Введите ID категории для удаления: ");
+        if (!int.TryParse(Console.ReadLine(), out int categoryId))
+        {
+            Console.WriteLine("Некорректный ID."); return;
+        }
+
+        using (var context = new MagiskHubContext(_dbContextOptions))
+        {
+            var category = context.ModuleCategories.Include(c => c.Modules).FirstOrDefault(c => c.CategoryID == categoryId);
+            if (category == null)
+            {
+                Console.WriteLine("Категория с таким ID не найдена."); return;
+            }
+
+            if (category.Modules.Any())
+            {
+                Console.WriteLine($"Нельзя удалить категорию '{category.CategoryName}', так как она используется модулями (ID модулей: {string.Join(", ", category.Modules.Select(m => m.ModuleID))}).");
+                Console.WriteLine("Сначала измените категорию у этих модулей.");
+                return;
+            }
+
+            Console.Write($"Вы уверены, что хотите удалить категорию '{category.CategoryName}'? (yes/no): ");
+            if (Console.ReadLine().ToLower() == "yes")
+            {
+                try
+                {
+                    context.ModuleCategories.Remove(category);
+                    context.SaveChanges();
+                    Console.WriteLine("Категория успешно удалена.");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Ошибка при удалении категории: {ex.Message}");
+                }
+            }
+            else
+            {
+                Console.WriteLine("Удаление отменено.");
+            }
+        }
+    }
+
+    // --- УПРАВЛЕНИЕ ТЕГАМИ (ДЛЯ МОДЕРАТОРА) ---
+
+    static void ManageTagsMenu()
+    {
+        while (true)
+        {
+            Console.WriteLine("\n--- Управление тегами ---");
+            Console.WriteLine("1. Показать все теги");
+            Console.WriteLine("2. Добавить новый тег");
+            Console.WriteLine("3. Редактировать тег");
+            Console.WriteLine("4. Удалить тег");
+            Console.WriteLine("0. Назад в главное меню");
+            Console.Write("Выберите опцию: ");
+            string choice = Console.ReadLine();
+
+            switch (choice)
+            {
+                case "1": ListAllTags(); break;
+                case "2": AddNewTag(); break;
+                case "3": EditTag(); break;
+                case "4": DeleteTag(); break;
+                case "0": return;
+                default: Console.WriteLine("Неверный ввод."); break;
+            }
+        }
+    }
+
+    static void ListAllTags()
+    {
+        using (var context = new MagiskHubContext(_dbContextOptions))
+        {
+            var tags = context.Tags.ToList();
+            if (!tags.Any())
+            {
+                Console.WriteLine("Тегов пока нет.");
+                return;
+            }
+            Console.WriteLine("\n--- Список тегов ---");
+            foreach (var tag in tags)
+            {
+                Console.WriteLine($"ID: {tag.TagID}, Название: {tag.TagName}");
+            }
+        }
+    }
+
+    static void AddNewTag()
+    {
+        Console.Write("Введите название нового тега: ");
+        string name = Console.ReadLine();
+
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            Console.WriteLine("Название тега не может быть пустым.");
+            return;
+        }
+
+        using (var context = new MagiskHubContext(_dbContextOptions))
+        {
+            if (context.Tags.Any(t => t.TagName.ToLower() == name.ToLower()))
+            {
+                Console.WriteLine("Тег с таким названием уже существует.");
+                return;
+            }
+
+            var newTag = new Tag { TagName = name };
+            try
+            {
+                context.Tags.Add(newTag);
+                context.SaveChanges();
+                Console.WriteLine($"Тег '{name}' успешно добавлен.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Ошибка при добавлении тега: {ex.Message}");
+            }
+        }
+    }
+
+    static void EditTag()
+    {
+        ListAllTags();
+        Console.Write("Введите ID тега для редактирования: ");
+        if (!int.TryParse(Console.ReadLine(), out int tagId))
+        {
+            Console.WriteLine("Некорректный ID."); return;
+        }
+
+        using (var context = new MagiskHubContext(_dbContextOptions))
+        {
+            var tag = context.Tags.Find(tagId);
+            if (tag == null)
+            {
+                Console.WriteLine("Тег с таким ID не найден."); return;
+            }
+
+            Console.Write($"Новое название для '{tag.TagName}' (оставьте пустым, чтобы не менять): ");
+            string newName = Console.ReadLine();
+
+            if (!string.IsNullOrWhiteSpace(newName) && newName.ToLower() != tag.TagName.ToLower())
+            {
+                if (context.Tags.Any(t => t.TagName.ToLower() == newName.ToLower() && t.TagID != tagId))
+                {
+                    Console.WriteLine("Тег с таким новым названием уже существует.");
+                    return;
+                }
+                tag.TagName = newName;
+                try
+                {
+                    context.SaveChanges();
+                    Console.WriteLine("Тег успешно обновлен.");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Ошибка при обновлении тега: {ex.Message}");
+                }
+            }
+            else
+            {
+                Console.WriteLine("Нет изменений для сохранения или новое имя совпадает со старым.");
+            }
+        }
+    }
+
+    static void DeleteTag()
+    {
+        ListAllTags();
+        Console.Write("Введите ID тега для удаления: ");
+        if (!int.TryParse(Console.ReadLine(), out int tagId))
+        {
+            Console.WriteLine("Некорректный ID."); return;
+        }
+
+        using (var context = new MagiskHubContext(_dbContextOptions))
+        {
+            // Проверяем, используется ли тег в связующей таблице ModuleTags
+            var tag = context.Tags.Include(t => t.ModuleTags).FirstOrDefault(t => t.TagID == tagId);
+
+            if (tag == null)
+            {
+                Console.WriteLine("Тег с таким ID не найден."); return;
+            }
+
+            if (tag.ModuleTags.Any())
+            {
+                Console.WriteLine($"Нельзя удалить тег '{tag.TagName}', так как он используется модулями.");
+                Console.WriteLine("Сначала удалите этот тег у всех модулей, которые его используют.");
+                // Можно было бы показать ID модулей, но это требует еще одного запроса
+                return;
+            }
+
+            Console.Write($"Вы уверены, что хотите удалить тег '{tag.TagName}'? (yes/no): ");
+            if (Console.ReadLine().ToLower() == "yes")
+            {
+                try
+                {
+                    context.Tags.Remove(tag);
+                    context.SaveChanges();
+                    Console.WriteLine("Тег успешно удален.");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Ошибка при удалении тега: {ex.Message}");
+                }
+            }
+            else
+            {
+                Console.WriteLine("Удаление отменено.");
+            }
+        }
+    }
+
 
     // --- ПРОСТОЕ ХЭШИРОВАНИЕ (НЕ ДЛЯ ПРОДА!) ---
     static string SimpleHashPassword(string password)
@@ -494,7 +858,7 @@ class Program
         Console.Write("Введите email: ");
         string email = Console.ReadLine();
         Console.Write("Введите пароль: ");
-        string password = Console.ReadLine(); // TODO: Скрывать ввод пароля
+        string password = Console.ReadLine();
 
         if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(password))
         {
@@ -515,14 +879,50 @@ class Program
                 return;
             }
 
-            // По умолчанию регистрируем как EndUser
-            var defaultRole = context.Roles.FirstOrDefault(r => r.RoleName == "EndUser");
+            // Для тестов
+            // Для тестов
+
+            Console.WriteLine("Введите нужную роль: \n" +
+                "1 - EndUser\n" +
+                "2 - Developer\n" +
+                "3 - Moderator");
+            string testFeature = Console.ReadLine();
+            string testFeature2 = "EndUser";
+
+            switch (testFeature)
+            {
+                case "1":
+                    testFeature2 = "EndUser";
+                    break;
+                case "2":
+                    testFeature2 = "Developer";
+                    break;
+                case "3":
+                    testFeature2 = "Moderator";
+                    break;
+            }
+            
+
+            var defaultRole = context.Roles.FirstOrDefault(r => r.RoleName == testFeature2);
             if (defaultRole == null) // Если роли EndUser нет, создадим (или используем ID=1 если есть seed)
             {
                 // Этого не должно быть, если есть SeedData
                 Console.WriteLine("Ошибка: Роль EndUser не найдена. Обратитесь к администратору.");
                 return;
             }
+            // Для тестов
+            // Для тестов
+
+
+            // По умолчанию регистрируем как EndUser
+
+            //var defaultRole = context.Roles.FirstOrDefault(r => r.RoleName == "EndUser");
+            //if (defaultRole == null) // Если роли EndUser нет, создадим (или используем ID=1 если есть seed)
+            //{
+            //    // Этого не должно быть, если есть SeedData
+            //    Console.WriteLine("Ошибка: Роль EndUser не найдена. Обратитесь к администратору.");
+            //    return;
+            //}
 
             var user = new User
             {
