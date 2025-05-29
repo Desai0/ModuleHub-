@@ -11,6 +11,9 @@ using System.Security.Cryptography;
 using Magisk_DB.IDataAcess;
 using Magisk_DB.DataAcess;
 using Microsoft.Extensions.DependencyInjection;
+using Magisk_DB.Services.Classes;
+using Magisk_DB.Services.Exceptions;
+using Magisk_DB.Services;
 //using MagiskHub.Data;
 
 namespace MagiskHub.Models
@@ -373,122 +376,146 @@ public class MagiskHubContext : DbContext
 
 class Program
 {
-    // Репозитории будут инициализированы в Main
-    private static IDbContextFactory<MagiskHubContext> _dbContextFactory; // Для EnsureCreated
-    private static IRoleRepository _roleRepository;
-    private static IUserRepository _userRepository;
-    private static IModuleCategoryRepository _moduleCategoryRepository;
-    private static ITagRepository _tagRepository;
-    private static IModuleRepository _moduleRepository;
-    private static IModuleVersionRepository _moduleVersionRepository;
-    private static IReviewRepository _reviewRepository;
-    private static ICompatibilityReportRepository _compatibilityReportRepository;
+    private static IUserService _userService;
+    private static IModuleService _moduleService;
+    private static IModerationService _moderationService;
+    private static User _currentUser = null;
 
-    private static User _currentUser = null; // Текущий залогиненный пользователь
-
-    static void Main(string[] args) // Синхронный Main
+    static async Task Main(string[] args)
     {
         var services = new ServiceCollection();
-        var connectionString = "Host=localhost;Database=Magisk;Username=postgres;Password=1234"; // ВАША СТРОКА
+        var connectionString = "Host=localhost;Database=Magisk;Username=postgres;Password=1234";
 
-        services.AddDbContextFactory<MagiskHubContext>(options =>
-            options.UseNpgsql(connectionString));
+        services.AddDbContextFactory<MagiskHubContext>(options => options.UseNpgsql(connectionString));
+        services.AddDbContext<MagiskHubContext>(options => options.UseNpgsql(connectionString), ServiceLifetime.Scoped);
 
-        // Регистрация всех ваших синхронных репозиториев
         services.AddScoped<IRoleRepository, RoleRepository>();
         services.AddScoped<IUserRepository, UserRepository>();
+        services.AddScoped<IModuleRepository, ModuleRepository>();
         services.AddScoped<IModuleCategoryRepository, ModuleCategoryRepository>();
         services.AddScoped<ITagRepository, TagRepository>();
-        services.AddScoped<IModuleRepository, ModuleRepository>();
         services.AddScoped<IModuleVersionRepository, ModuleVersionRepository>();
         services.AddScoped<IReviewRepository, ReviewRepository>();
         services.AddScoped<ICompatibilityReportRepository, CompatibilityReportRepository>();
 
+        services.AddScoped<IUserService, UserService>();
+        services.AddScoped<IModuleService, ModuleService>();
+        services.AddScoped<IModerationService, ModerationService>();
+
         var serviceProvider = services.BuildServiceProvider();
 
-        // Получение экземпляров репозиториев
-        _dbContextFactory = serviceProvider.GetRequiredService<IDbContextFactory<MagiskHubContext>>();
-        _roleRepository = serviceProvider.GetRequiredService<IRoleRepository>();
-        _userRepository = serviceProvider.GetRequiredService<IUserRepository>();
-        _moduleCategoryRepository = serviceProvider.GetRequiredService<IModuleCategoryRepository>();
-        _tagRepository = serviceProvider.GetRequiredService<ITagRepository>();
-        _moduleRepository = serviceProvider.GetRequiredService<IModuleRepository>();
-        _moduleVersionRepository = serviceProvider.GetRequiredService<IModuleVersionRepository>();
-        _reviewRepository = serviceProvider.GetRequiredService<IReviewRepository>();
-        _compatibilityReportRepository = serviceProvider.GetRequiredService<ICompatibilityReportRepository>();
+        _userService = serviceProvider.GetRequiredService<IUserService>();
+        _moduleService = serviceProvider.GetRequiredService<IModuleService>();
+        _moderationService = serviceProvider.GetRequiredService<IModerationService>();
 
-        // Убедимся, что БД создана (для разработки)
-        using (var context = _dbContextFactory.CreateDbContext()) // Используем фабрику
+        using (var scope = serviceProvider.CreateScope())
         {
-            context.Database.EnsureCreated(); // Синхронная версия
+            var dbContext = scope.ServiceProvider.GetRequiredService<MagiskHubContext>();
+            await dbContext.Database.EnsureCreatedAsync();
         }
 
         Console.WriteLine("Добро пожаловать в MagiskHub Console!");
+        Console.WriteLine("-----------------------------------");
 
         while (true)
         {
-            try // Общий try-catch для меню, чтобы ловить DataAccessException
+            if (_currentUser == null)
             {
-                if (_currentUser == null)
-                {
-                    ShowMainMenuUnauthenticated();
-                }
-                else
-                {
-                    ShowMainMenuAuthenticated();
-                }
+                await ShowMainMenuUnauthenticatedAsync();
             }
-            catch (DataAccessException daEx)
+            else
             {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"\nОШИБКА ДОСТУПА К ДАННЫМ: {daEx.Message}");
-                if (daEx.InnerException != null)
-                {
-                    Console.WriteLine($"Подробнее: {daEx.InnerException.Message}");
-                }
-                Console.ResetColor();
-                Console.WriteLine("Пожалуйста, попробуйте еще раз или обратитесь к администратору.");
-            }
-            catch (Exception ex)
-            {
-                Console.ForegroundColor = ConsoleColor.DarkRed;
-                Console.WriteLine($"\nНЕПРЕДВИДЕННАЯ ОШИБКА: {ex.Message}");
-                Console.ResetColor();
-                Console.WriteLine("Пожалуйста, попробуйте еще раз или обратитесь к администратору.");
+                await ShowMainMenuAuthenticatedAsync();
             }
         }
     }
 
-    // --- МЕНЮ ---
-    static void ShowMainMenuUnauthenticated()
+    static string ReadNonEmptyLine(string prompt, bool allowEmptyForUpdate = false)
     {
-        Console.WriteLine("\nГлавное меню (Гость):");
+        string input;
+        do
+        {
+            Console.Write(prompt);
+            input = Console.ReadLine();
+            if (allowEmptyForUpdate && string.IsNullOrEmpty(input)) return input; // Разрешаем пустой ввод для обновлений
+
+            if (string.IsNullOrWhiteSpace(input) && !allowEmptyForUpdate)
+            {
+                Console.WriteLine("Ввод не может быть пустым. Пожалуйста, попробуйте снова.");
+            }
+        } while (string.IsNullOrWhiteSpace(input) && !allowEmptyForUpdate);
+        return input;
+    }
+
+    static int ReadInt(string prompt, int min = int.MinValue, int max = int.MaxValue, bool allowEmptyForUpdate = false, int defaultValueIfEmpty = -1)
+    {
+        int value;
+        while (true)
+        {
+            Console.Write(prompt);
+            string input = Console.ReadLine();
+
+            if (allowEmptyForUpdate && string.IsNullOrEmpty(input)) return defaultValueIfEmpty;
+
+            if (int.TryParse(input, out value) && value >= min && value <= max)
+            {
+                return value;
+            }
+            Console.WriteLine($"Некорректный ввод. Пожалуйста, введите целое число от {min} до {max}.");
+        }
+    }
+
+    static async Task ExecuteServiceLogicAsync(Func<Task> serviceAction, string successMessage = "Операция выполнена успешно.")
+    {
+        try
+        {
+            await serviceAction();
+            if (!string.IsNullOrEmpty(successMessage))
+            {
+                Console.WriteLine(successMessage);
+            }
+        }
+        catch (NotFoundException ex) { Console.WriteLine($"Не найдено: {ex.Message}"); }
+        catch (BusinessRuleException ex) { Console.WriteLine($"Ошибка бизнес-логики: {ex.Message}"); }
+        catch (DataAccessException ex) { Console.WriteLine($"Ошибка доступа к данным: {ex.Message} (Подробнее: {ex.InnerException?.Message})"); }
+        catch (Exception ex) { Console.WriteLine($"Произошла непредвиденная ошибка: {ex.Message}"); }
+        Console.WriteLine("Нажмите любую клавишу для продолжения...");
+        Console.ReadKey();
+        Console.Clear(); // Очистка экрана после операции
+    }
+
+    // --- МЕНЮ ---
+    // ShowMainMenuUnauthenticatedAsync и ShowMainMenuAuthenticatedAsync остаются такими же, как в предыдущем ответе
+    static async Task ShowMainMenuUnauthenticatedAsync()
+    {
+        Console.WriteLine("\nМеню Гостя:");
         Console.WriteLine("1. Просмотр всех модулей");
         Console.WriteLine("2. Поиск модуля по названию");
         Console.WriteLine("3. Регистрация");
         Console.WriteLine("4. Вход");
-        Console.WriteLine("0. Выход");
-        Console.Write("Выберите опцию: ");
+        Console.WriteLine("0. Выход из приложения");
+        Console.Write("Ваш выбор: ");
         string choice = Console.ReadLine();
 
         switch (choice)
         {
-            case "1": ViewAllModules(); break;
-            case "2": SearchModuleByName(); break;
-            case "3": RegisterUser(); break;
-            case "4": LoginUser(); break;
+            case "1": await ViewAllModulesUIAsync(); break;
+            case "2": await SearchModuleByNameUIAsync(); break;
+            case "3": await RegisterUserUIAsync(); break;
+            case "4": await LoginUserUIAsync(); break;
             case "0": Environment.Exit(0); break;
-            default: Console.WriteLine("Неверный ввод."); break;
+            default: Console.WriteLine("Неверный выбор. Попробуйте снова."); break;
         }
     }
 
-    static void ShowMainMenuAuthenticated()
+    static async Task ShowMainMenuAuthenticatedAsync()
     {
-        Console.WriteLine($"\nГлавное меню (Пользователь: {_currentUser.Username} | Роль: {_currentUser.Role.RoleName}):");
+        Console.WriteLine($"\nМеню (Пользователь: {_currentUser.Username} | Роль: {_currentUser.Role.RoleName}):");
         Console.WriteLine("1. Просмотр всех модулей");
         Console.WriteLine("2. Поиск модуля по названию");
-        Console.WriteLine("3. Оставить отзыв на модуль");
-        Console.WriteLine("4. Сообщить о совместимости версии модуля");
+        Console.WriteLine("3. Просмотр деталей модуля");
+        Console.WriteLine("4. Оставить отзыв на модуль");
+        Console.WriteLine("5. Сообщить о совместимости версии модуля");
 
         if (_currentUser.Role.RoleName == "Developer")
         {
@@ -496,41 +523,425 @@ class Program
             Console.WriteLine("D1. Загрузить новый модуль");
             Console.WriteLine("D2. Добавить новую версию к моему модулю");
             Console.WriteLine("D3. Просмотреть мои модули");
+            Console.WriteLine("D4. Управление тегами моего модуля");
         }
         if (_currentUser.Role.RoleName == "Moderator")
         {
             Console.WriteLine("--- Меню Модератора ---");
             Console.WriteLine("M1. Верифицировать модуль");
-            Console.WriteLine("M2. Управление категориями (TODO)"); // Пример для расширения
-            Console.WriteLine("M3. Управление тегами (TODO)");      // Пример для расширения
+            Console.WriteLine("M2. Управление категориями");
+            Console.WriteLine("M3. Управление тегами (глобально)");
         }
 
         Console.WriteLine("9. Выйти из аккаунта");
         Console.WriteLine("0. Выход из приложения");
-        Console.Write("Выберите опцию: ");
+        Console.Write("Ваш выбор: ");
         string choice = Console.ReadLine();
 
         switch (choice)
         {
-            case "1": ViewAllModules(); break;
-            case "2": SearchModuleByName(); break;
-            case "3": AddReview(); break;
-            case "4": ReportCompatibility(); break;
-            case "D1": if (_currentUser.Role.RoleName == "Developer") UploadNewModule(); else Console.WriteLine("Доступ запрещен."); break;
-            case "D2": if (_currentUser.Role.RoleName == "Developer") AddVersionToMyModule(); else Console.WriteLine("Доступ запрещен."); break;
-            case "D3": if (_currentUser.Role.RoleName == "Developer") ViewMyModules(); else Console.WriteLine("Доступ запрещен."); break;
-            case "M1": if (_currentUser.Role.RoleName == "Moderator") VerifyModule(); else Console.WriteLine("Доступ запрещен."); break;
-            case "M2": if (_currentUser.Role.RoleName == "Moderator") ManageCategoriesMenu(); else Console.WriteLine("Доступ запрещен."); break;
-            case "M3": if (_currentUser.Role.RoleName == "Moderator") ManageTagsMenu(); else Console.WriteLine("Доступ запрещен."); break;
-            // TODO: M2, M3
-            case "9": LogoutUser(); break;
+            case "1": await ViewAllModulesUIAsync(); break;
+            case "2": await SearchModuleByNameUIAsync(); break;
+            case "3": await ViewModuleDetailsUIAsync(); break;
+            case "4": await AddReviewUIAsync(); break;
+            case "5": await ReportCompatibilityUIAsync(); break;
+            case "D1": if (_currentUser.Role.RoleName == "Developer") await UploadNewModuleUIAsync(); else Console.WriteLine("Доступ запрещен."); break;
+            case "D2": if (_currentUser.Role.RoleName == "Developer") await AddVersionToMyModuleUIAsync(); else Console.WriteLine("Доступ запрещен."); break;
+            case "D3": if (_currentUser.Role.RoleName == "Developer") await ViewMyModulesUIAsync(); else Console.WriteLine("Доступ запрещен."); break;
+            case "D4": if (_currentUser.Role.RoleName == "Developer") await ManageMyModuleTagsUIAsync(); else Console.WriteLine("Доступ запрещен."); break;
+            case "M1": if (_currentUser.Role.RoleName == "Moderator") await VerifyModuleUIAsync(); else Console.WriteLine("Доступ запрещен."); break;
+            case "M2": if (_currentUser.Role.RoleName == "Moderator") await ManageCategoriesMenuUIAsync(); else Console.WriteLine("Доступ запрещен."); break;
+            case "M3": if (_currentUser.Role.RoleName == "Moderator") await ManageGlobalTagsMenuUIAsync(); else Console.WriteLine("Доступ запрещен."); break;
+            case "9": LogoutUserUI(); break;
             case "0": Environment.Exit(0); break;
-            default: Console.WriteLine("Неверный ввод."); break;
+            default: Console.WriteLine("Неверный выбор. Попробуйте снова."); break;
         }
     }
-    // --- УПРАВЛЕНИЕ КАТЕГОРИЯМИ (ДЛЯ МОДЕРАТОРА) ---
 
-    static void ManageCategoriesMenu()
+    // --- РЕАЛИЗАЦИЯ UI МЕТОДОВ ---
+
+    // Методы RegisterUserUIAsync, LoginUserUI, LogoutUserUI, ViewAllModulesUIAsync, SearchModuleByNameUIAsync, ViewModuleDetailsUIAsync, UploadNewModuleUIAsync
+    // остаются такими же, как в предыдущем ответе.
+
+    // Копирую их для полноты:
+    static async Task RegisterUserUIAsync()
+    {
+        Console.WriteLine("\n--- Регистрация ---");
+        string username = ReadNonEmptyLine("Имя пользователя: ");
+        string email = ReadNonEmptyLine("Email: ");
+        string password = ReadNonEmptyLine("Пароль: ");
+        await ExecuteServiceLogicAsync(
+            async () => {
+                var user = await _userService.RegisterAsync(username, email, password); // Роль по умолчанию "EndUser"
+                Console.WriteLine($"Пользователь '{user.Username}' успешно зарегистрирован с ролью '{user.Role.RoleName}'.");
+            },
+            null
+        );
+    }
+
+    static async Task LoginUserUIAsync()
+    {
+        Console.WriteLine("\n--- Вход ---");
+        string username = ReadNonEmptyLine("Имя пользователя: ");
+        string password = ReadNonEmptyLine("Пароль: ");
+        await ExecuteServiceLogicAsync(
+            async () => {
+                _currentUser = await _userService.LoginAsync(username, password);
+                Console.WriteLine($"Добро пожаловать, {_currentUser.Username}!");
+            },
+            null
+        );
+    }
+
+    static void LogoutUserUI()
+    {
+        if (_currentUser != null)
+        {
+            Console.WriteLine($"Пользователь {_currentUser.Username} вышел из системы.");
+            _currentUser = null;
+        }
+        else
+        {
+            Console.WriteLine("Вы не вошли в систему.");
+        }
+        Console.WriteLine("Нажмите любую клавишу для продолжения...");
+        Console.ReadKey();
+        Console.Clear();
+    }
+
+    static async Task ViewAllModulesUIAsync()
+    {
+        Console.WriteLine("\n--- Список всех модулей ---");
+        await ExecuteServiceLogicAsync(
+            async () => {
+                var modules = await _moduleService.GetAllModulesAsync();
+                if (!modules.Any()) { Console.WriteLine("Модулей пока нет."); return; }
+                foreach (var module in modules)
+                {
+                    Console.WriteLine($"ID: {module.ModuleID}, Название: {module.Name}, Автор: {module.Author?.Username ?? "N/A"}, " +
+                                      $"Категория: {module.Category?.CategoryName ?? "N/A"}, Верифицирован: {module.IsVerified}");
+                }
+            },
+            null
+        );
+    }
+
+    static async Task SearchModuleByNameUIAsync()
+    {
+        Console.WriteLine("\n--- Поиск модуля ---");
+        string searchTerm = ReadNonEmptyLine("Введите название или часть названия для поиска: ");
+        await ExecuteServiceLogicAsync(
+           async () => {
+               var modules = await _moduleService.SearchModulesByNameAsync(searchTerm);
+               if (!modules.Any()) { Console.WriteLine($"Модули по запросу '{searchTerm}' не найдены."); return; }
+               Console.WriteLine($"\nРезультаты поиска по '{searchTerm}':");
+               foreach (var module in modules)
+               {
+                   Console.WriteLine($"ID: {module.ModuleID}, Название: {module.Name}, Автор: {module.Author?.Username ?? "N/A"}, Категория: {module.Category?.CategoryName ?? "N/A"}");
+               }
+           },
+           null
+       );
+    }
+
+    static async Task ViewModuleDetailsUIAsync()
+    {
+        Console.WriteLine("\n--- Детали модуля ---");
+        int moduleId = ReadInt("Введите ID модуля для просмотра деталей: ", 1);
+        await ExecuteServiceLogicAsync(
+            async () => {
+                var module = await _moduleService.GetModuleByIdAsync(moduleId);
+                Console.WriteLine($"\nДетали модуля: {module.Name} (ID: {module.ModuleID})");
+                Console.WriteLine($"Автор: {module.Author.Username}");
+                Console.WriteLine($"Категория: {module.Category.CategoryName}");
+                Console.WriteLine($"Описание: {module.Description}");
+                Console.WriteLine($"Верифицирован: {module.IsVerified}");
+                Console.WriteLine($"Создан: {module.CreationDate.ToLocalTime()}, Обновлен: {module.LastUpdateDate.ToLocalTime()}");
+
+                Console.WriteLine("\nВерсии:");
+                if (module.Versions != null && module.Versions.Any())
+                {
+                    foreach (var ver in module.Versions.OrderByDescending(v => v.UploadDate))
+                    {
+                        Console.WriteLine($"  - ID Версии: {ver.VersionID}, Строка версии: {ver.VersionString}, Загружен: {ver.UploadDate.ToLocalTime().ToShortDateString()}");
+                        Console.WriteLine($"    Ссылка: {ver.DownloadLink}");
+                        if (!string.IsNullOrWhiteSpace(ver.Changelog)) Console.WriteLine($"    Изменения: {ver.Changelog}");
+                    }
+                }
+                else { Console.WriteLine("  Версий нет."); }
+
+                Console.WriteLine("\nОтзывы:");
+                if (module.Reviews != null && module.Reviews.Any())
+                {
+                    foreach (var rev in module.Reviews.OrderByDescending(r => r.ReviewDate))
+                    {
+                        Console.WriteLine($"  - От {rev.User?.Username ?? "Аноним"} ({rev.ReviewDate.ToLocalTime().ToShortDateString()}), Оценка: {rev.Rating}/5");
+                        Console.WriteLine($"    {rev.CommentText}");
+                    }
+                }
+                else { Console.WriteLine("  Отзывов нет."); }
+
+                Console.WriteLine("\nТеги:");
+                if (module.ModuleTags != null && module.ModuleTags.Any())
+                {
+                    Console.WriteLine($"  {string.Join(", ", module.ModuleTags.Select(mt => mt.Tag?.TagName ?? "N/A"))}");
+                }
+                else { Console.WriteLine("  Тегов нет."); }
+            },
+            null
+        );
+    }
+
+    static async Task UploadNewModuleUIAsync()
+    {
+        Console.WriteLine("\n--- Загрузка нового модуля ---");
+        string name = ReadNonEmptyLine("Название модуля: ");
+        string description = ReadNonEmptyLine("Описание: ");
+
+        var categories = (await _moderationService.GetAllCategoriesAsync()).ToList();
+        if (!categories.Any()) { Console.WriteLine("Нет доступных категорий. Обратитесь к модератору."); return; }
+        Console.WriteLine("Доступные категории:");
+        categories.ForEach(cat => Console.WriteLine($"ID: {cat.CategoryID} - {cat.CategoryName}"));
+        int categoryId = ReadInt("ID категории: ", 1, categories.Any() ? categories.Max(c => c.CategoryID) : 1);
+
+
+        string versionString = ReadNonEmptyLine("Начальная версия (например, v1.0): ");
+        string downloadLink = ReadNonEmptyLine("Ссылка на скачивание: ");
+        Console.Write("Changelog (необязательно): ");
+        string changelog = Console.ReadLine();
+        string minMagiskVersion = ReadNonEmptyLine("Минимальная требуемая версия Magisk (например, 20.4): "); // Новый ввод
+
+        await ExecuteServiceLogicAsync(
+            async () => {
+                var module = await _moduleService.UploadNewModuleAsync(
+                    _currentUser.UserID,
+                    name,
+                    description,
+                    categoryId,
+                    versionString,
+                    downloadLink,
+                    changelog,
+                    minMagiskVersion // Передаем новое значение
+                );
+                Console.WriteLine($"Модуль '{module.Name}' (ID: {module.ModuleID}) и его версия '{module.Versions.First().VersionString}' успешно загружены и ожидают верификации.");
+            },
+            null
+        );
+    }
+
+
+    static async Task AddReviewUIAsync()
+    {
+        Console.WriteLine("\n--- Оставить отзыв ---");
+        int moduleId = ReadInt("Введите ID модуля, на который хотите оставить отзыв: ", 1);
+        int rating = ReadInt("Ваша оценка (1-5): ", 1, 5);
+        string comment = ReadNonEmptyLine("Комментарий: ");
+
+        await ExecuteServiceLogicAsync(
+            async () => {
+                await _moduleService.AddReviewAsync(moduleId, _currentUser.UserID, rating, comment);
+            },
+            "Отзыв успешно добавлен!"
+        );
+    }
+
+    static async Task ReportCompatibilityUIAsync()
+    {
+        Console.WriteLine("\n--- Сообщить о совместимости ---");
+        // Сначала нужно дать пользователю выбрать модуль и версию
+        await ViewAllModulesUIAsync(); // Показываем все модули
+        int moduleIdForReport = ReadInt("Введите ID модуля, для которого хотите сообщить о совместимости: ", 1);
+        Module selectedModule = null;
+        try { selectedModule = await _moduleService.GetModuleByIdAsync(moduleIdForReport); } catch { /* обработано ExecuteServiceLogicAsync */ }
+        if (selectedModule == null) { Console.WriteLine("Модуль не найден или ошибка при получении."); return; }
+
+        if (selectedModule.Versions == null || !selectedModule.Versions.Any())
+        {
+            Console.WriteLine("У этого модуля нет версий."); return;
+        }
+        Console.WriteLine("Доступные версии этого модуля:");
+        selectedModule.Versions.OrderByDescending(v => v.UploadDate).ToList().ForEach(v => Console.WriteLine($"ID Версии: {v.VersionID} - {v.VersionString}"));
+        int moduleVersionId = ReadInt("Введите ID версии модуля: ", 1);
+
+
+        string deviceModel = ReadNonEmptyLine("Модель вашего устройства: ");
+        string androidVersion = ReadNonEmptyLine("Версия Android: ");
+        Console.WriteLine("Статус работы: 1-Работает, 2-Работает с проблемами, 3-Не работает");
+        string worksStatusInput = ReadNonEmptyLine("Выберите статус (1/2/3): ");
+        string worksStatus = worksStatusInput switch
+        {
+            "1" => "Works",
+            "2" => "WorksWithIssues",
+            "3" => "DoesNotWork",
+            _ => "Unknown" // или выбросить ошибку
+        };
+        if (worksStatus == "Unknown") { Console.WriteLine("Некорректный статус."); return; }
+
+        Console.Write("Дополнительные заметки (необязательно): ");
+        string notes = Console.ReadLine();
+
+        await ExecuteServiceLogicAsync(
+            async () => {
+                await _moduleService.AddCompatibilityReportAsync(moduleVersionId, _currentUser.UserID, deviceModel, androidVersion, worksStatus, notes);
+            },
+            "Отчет о совместимости успешно добавлен!"
+        );
+    }
+
+    static async Task AddVersionToMyModuleUIAsync()
+    {
+        Console.WriteLine("\n--- Добавить новую версию к модулю ---");
+        var myModules = (await _moduleService.GetModulesByAuthorAsync(_currentUser.UserID)).ToList();
+        if (!myModules.Any())
+        {
+            Console.WriteLine("У вас нет загруженных модулей.");
+            Console.WriteLine("Нажмите любую клавишу для продолжения...");
+            Console.ReadKey();
+            Console.Clear();
+            return;
+        }
+
+        Console.WriteLine("Ваши модули:");
+        myModules.ForEach(m => Console.WriteLine($"ID: {m.ModuleID} - {m.Name}"));
+        int moduleId = ReadInt("Введите ID модуля, к которому хотите добавить версию: ", 1);
+
+        // Проверка, что модуль принадлежит текущему пользователю
+        if (!myModules.Any(m => m.ModuleID == moduleId))
+        {
+            Console.WriteLine("Это не ваш модуль или ID некорректен.");
+            Console.WriteLine("Нажмите любую клавишу для продолжения...");
+            Console.ReadKey();
+            Console.Clear();
+            return;
+        }
+
+        string versionString = ReadNonEmptyLine("Новая версия (например, v1.1): ");
+        string downloadLink = ReadNonEmptyLine("Ссылка на скачивание: ");
+        Console.Write("Changelog: ");
+        string changelog = Console.ReadLine();
+        string minMagiskVersion = ReadNonEmptyLine("Минимальная требуемая версия Magisk (например, 20.4): "); // Новый ввод
+
+        await ExecuteServiceLogicAsync(
+            async () => {
+                var newVersion = await _moduleService.AddVersionToModuleAsync(
+                    moduleId,
+                    _currentUser.UserID,
+                    versionString,
+                    downloadLink,
+                    changelog,
+                    minMagiskVersion // Передаем новое значение
+                );
+                Console.WriteLine($"Новая версия '{newVersion.VersionString}' для модуля ID {moduleId} успешно добавлена.");
+            },
+            null // Сообщение об успехе уже внутри лямбды
+        );
+    }
+
+    static async Task ViewMyModulesUIAsync()
+    {
+        Console.WriteLine("\n--- Ваши модули ---");
+        await ExecuteServiceLogicAsync(
+            async () => {
+                var myModules = await _moduleService.GetModulesByAuthorAsync(_currentUser.UserID);
+                if (!myModules.Any()) { Console.WriteLine("У вас нет загруженных модулей."); return; }
+                foreach (var module in myModules)
+                {
+                    Console.WriteLine($"ID: {module.ModuleID}, Название: {module.Name}, Категория: {module.Category?.CategoryName ?? "N/A"}, Верифицирован: {module.IsVerified}");
+                    if (module.Versions != null && module.Versions.Any())
+                    {
+                        Console.WriteLine("  Версии:");
+                        foreach (var ver in module.Versions.OrderByDescending(v => v.UploadDate))
+                        {
+                            Console.WriteLine($"    - ID: {ver.VersionID}, {ver.VersionString} (Загружено: {ver.UploadDate.ToLocalTime().ToShortDateString()})");
+                        }
+                    }
+                    else { Console.WriteLine("  (Версий нет)"); }
+                    Console.WriteLine("  Теги: " + (module.ModuleTags != null && module.ModuleTags.Any() ? string.Join(", ", module.ModuleTags.Select(mt => mt.Tag?.TagName ?? "N/A")) : "Нет тегов"));
+                    Console.WriteLine("---");
+                }
+            },
+            null
+        );
+    }
+
+    static async Task ManageMyModuleTagsUIAsync()
+    {
+        Console.WriteLine("\n--- Управление тегами моего модуля ---");
+        var myModules = (await _moduleService.GetModulesByAuthorAsync(_currentUser.UserID)).ToList();
+        if (!myModules.Any()) { Console.WriteLine("У вас нет загруженных модулей."); return; }
+
+        Console.WriteLine("Ваши модули:");
+        myModules.ForEach(m => Console.WriteLine($"ID: {m.ModuleID} - {m.Name}"));
+        int moduleId = ReadInt("Введите ID модуля для управления тегами: ", 1);
+
+        Module selectedModule = null;
+        try { selectedModule = await _moduleService.GetModuleByIdAsync(moduleId); } catch { }
+        if (selectedModule == null || selectedModule.AuthorUserID != _currentUser.UserID)
+        { Console.WriteLine("Модуль не найден или не принадлежит вам."); return; }
+
+        Console.WriteLine($"Текущие теги для модуля '{selectedModule.Name}': " +
+            (selectedModule.ModuleTags.Any() ? string.Join(", ", selectedModule.ModuleTags.Select(mt => mt.Tag.TagName)) : "Нет"));
+
+        var allTags = (await _moderationService.GetAllTagsAsync()).ToList();
+        if (!allTags.Any()) { Console.WriteLine("В системе нет тегов для присвоения."); return; }
+        Console.WriteLine("\nДоступные теги в системе:");
+        allTags.ForEach(t => Console.WriteLine($"ID: {t.TagID} - {t.TagName}"));
+
+        Console.WriteLine("Введите ID тегов, которые должны быть у модуля, через запятую (например, 1,3,5).");
+        Console.WriteLine("Чтобы удалить все теги, оставьте поле пустым и нажмите Enter.");
+        string tagIdsInput = Console.ReadLine();
+
+        List<int> newTagIds = new List<int>();
+        if (!string.IsNullOrWhiteSpace(tagIdsInput))
+        {
+            try
+            {
+                newTagIds = tagIdsInput.Split(',').Select(idStr => int.Parse(idStr.Trim())).Distinct().ToList();
+            }
+            catch { Console.WriteLine("Некорректный формат ввода ID тегов."); return; }
+        }
+
+        await ExecuteServiceLogicAsync(
+            async () => {
+                await _moderationService.AssignTagsToModuleAsync(moduleId, newTagIds);
+            },
+            $"Теги для модуля '{selectedModule.Name}' обновлены."
+        );
+    }
+
+    static async Task VerifyModuleUIAsync()
+    {
+        Console.WriteLine("\n--- Верификация модуля ---");
+        var unverifiedModules = (await _moderationService.GetUnverifiedModulesAsync()).ToList();
+        if (!unverifiedModules.Any()) { Console.WriteLine("Нет модулей, ожидающих верификации."); return; }
+
+        Console.WriteLine("Модули для верификации:");
+        unverifiedModules.ForEach(m => Console.WriteLine($"ID: {m.ModuleID} - {m.Name} (Автор: {m.Author?.Username ?? "N/A"})"));
+        int moduleId = ReadInt("Введите ID модуля для изменения статуса верификации: ", 1);
+
+        Module moduleToVerify = null;
+        try { moduleToVerify = await _moduleService.GetModuleByIdAsync(moduleId); } catch { } // Получаем модуль, чтобы знать текущий статус
+        if (moduleToVerify == null) { Console.WriteLine("Модуль не найден."); return; }
+
+
+        Console.WriteLine($"Текущий статус верификации для '{moduleToVerify.Name}': {moduleToVerify.IsVerified}");
+        Console.Write($"Изменить статус на {!moduleToVerify.IsVerified}? (yes/no): ");
+        string choice = ReadNonEmptyLine("").ToLower();
+
+        if (choice == "yes")
+        {
+            await ExecuteServiceLogicAsync(
+                async () => {
+                    var updatedModule = await _moderationService.VerifyModuleAsync(moduleId, !moduleToVerify.IsVerified);
+                    Console.WriteLine($"Статус верификации модуля '{updatedModule.Name}' изменен на {updatedModule.IsVerified}.");
+                },
+                null
+            );
+        }
+        else { Console.WriteLine("Операция отменена."); }
+    }
+
+    static async Task ManageCategoriesMenuUIAsync()
     {
         while (true)
         {
@@ -540,561 +951,84 @@ class Program
             Console.WriteLine("3. Редактировать категорию");
             Console.WriteLine("4. Удалить категорию");
             Console.WriteLine("0. Назад в главное меню");
-            Console.Write("Выберите опцию: ");
+            Console.Write("Ваш выбор: ");
             string choice = Console.ReadLine();
 
             switch (choice)
             {
-                case "1": ListAllCategories(); break;
-                case "2": AddNewCategory(); break;
-                case "3": EditCategory(); break;
-                case "4": DeleteCategory(); break;
-                case "0": return; // Возврат в предыдущее меню
-                default: Console.WriteLine("Неверный ввод."); break;
+                case "1": await ListAllCategoriesUIAsync(); break;
+                case "2": await AddNewCategoryUIAsync(); break;
+                case "3": await EditCategoryUIAsync(); break;
+                case "4": await DeleteCategoryUIAsync(); break;
+                case "0": Console.Clear(); return;
+                default: Console.WriteLine("Неверный выбор."); break;
             }
         }
     }
 
-    static void ListAllCategories()
+    static async Task ListAllCategoriesUIAsync()
     {
-        var categories = _moduleCategoryRepository.GetAll();
-        if (!categories.Any()) { Console.WriteLine("Категорий нет."); return; }
         Console.WriteLine("\n--- Список категорий ---");
-        foreach (var c in categories) { Console.WriteLine($"ID: {c.CategoryID}, Название: {c.CategoryName}, Описание: {c.Description ?? "N/A"}"); }
+        await ExecuteServiceLogicAsync(
+           async () => {
+               var categories = await _moderationService.GetAllCategoriesAsync();
+               if (!categories.Any()) { Console.WriteLine("Категорий нет."); return; }
+               foreach (var cat in categories) { Console.WriteLine($"ID: {cat.CategoryID}, Название: {cat.CategoryName}, Описание: {cat.Description ?? "N/A"}"); }
+           },
+           null
+       );
     }
-
-    static void AddNewCategory()
+    static async Task AddNewCategoryUIAsync()
     {
-        Console.Write("Название новой категории: "); string name = Console.ReadLine();
-        Console.Write("Описание (необязательно): "); string desc = Console.ReadLine();
-        if (string.IsNullOrWhiteSpace(name)) { Console.WriteLine("Название не может быть пустым."); return; }
-        if (_moduleCategoryRepository.GetByName(name) != null) { Console.WriteLine("Категория с таким названием уже существует."); return; }
-        _moduleCategoryRepository.Add(new ModuleCategory { CategoryName = name, Description = desc });
-        Console.WriteLine("Категория добавлена.");
+        Console.WriteLine("\n--- Добавление категории ---");
+        string name = ReadNonEmptyLine("Название: ");
+        Console.Write("Описание (необязательно): ");
+        string description = Console.ReadLine();
+        await ExecuteServiceLogicAsync(
+            async () => {
+                var cat = await _moderationService.AddCategoryAsync(name, description);
+                Console.WriteLine($"Категория '{cat.CategoryName}' (ID: {cat.CategoryID}) добавлена.");
+            }, null
+        );
     }
-
-    static void EditCategory()
+    static async Task EditCategoryUIAsync()
     {
-        ListAllCategories();
-        Console.Write("ID категории для редактирования: ");
-        if (!int.TryParse(Console.ReadLine(), out int id)) { Console.WriteLine("Неверный ID."); return; }
-        var cat = _moduleCategoryRepository.GetById(id);
-        if (cat == null) { Console.WriteLine("Категория не найдена."); return; }
+        Console.WriteLine("\n--- Редактирование категории ---");
+        await ListAllCategoriesUIAsync(); // Показать для выбора
+        int categoryId = ReadInt("Введите ID категории для редактирования: ", 1);
+        string newName = ReadNonEmptyLine("Новое название (оставьте пустым, чтобы не менять): ", true);
+        Console.Write("Новое описание (оставьте пустым, чтобы не менять, или введите 'clear' для удаления): ");
+        string newDescriptionInput = Console.ReadLine();
+        string newDescription = newDescriptionInput.ToLower() == "clear" ? "" : newDescriptionInput;
 
-        Console.Write($"Новое название для '{cat.CategoryName}' (Enter, чтобы не менять): "); string newName = Console.ReadLine();
-        Console.Write($"Новое описание (Enter, чтобы не менять): "); string newDesc = Console.ReadLine();
-        bool changed = false;
-        if (!string.IsNullOrWhiteSpace(newName) && newName != cat.CategoryName)
+
+        await ExecuteServiceLogicAsync(
+            async () => {
+                var cat = await _moderationService.UpdateCategoryAsync(categoryId, newName, newDescription);
+                Console.WriteLine($"Категория '{cat.CategoryName}' (ID: {cat.CategoryID}) обновлена.");
+            }, null
+        );
+    }
+    static async Task DeleteCategoryUIAsync()
+    {
+        Console.WriteLine("\n--- Удаление категории ---");
+        await ListAllCategoriesUIAsync();
+        int categoryId = ReadInt("Введите ID категории для удаления: ", 1);
+        Console.Write($"Вы уверены, что хотите удалить категорию ID {categoryId}? Это действие необратимо. (yes/no): ");
+        if (ReadNonEmptyLine("").ToLower() == "yes")
         {
-            if (_moduleCategoryRepository.GetByName(newName) != null && _moduleCategoryRepository.GetByName(newName).CategoryID != id)
-            { Console.WriteLine("Другая категория с таким названием уже существует."); return; }
-            cat.CategoryName = newName; changed = true;
-        }
-        if (newDesc != cat.Description) // Позволяем очистить описание
-        {
-            cat.Description = string.IsNullOrWhiteSpace(newDesc) ? null : newDesc;
-            changed = true;
-        }
-        if (changed) { _moduleCategoryRepository.Update(cat); Console.WriteLine("Категория обновлена."); }
-        else { Console.WriteLine("Нет изменений."); }
-    }
-
-    static void DeleteCategory()
-    {
-        ListAllCategories();
-        Console.Write("ID категории для удаления: ");
-        if (!int.TryParse(Console.ReadLine(), out int id)) { Console.WriteLine("Неверный ID."); return; }
-        var cat = _moduleCategoryRepository.GetById(id); // Нужна для имени
-        if (cat == null) { Console.WriteLine("Категория не найдена."); return; }
-
-        if (_moduleCategoryRepository.IsCategoryInUse(id))
-        { Console.WriteLine($"Категория '{cat.CategoryName}' используется модулями и не может быть удалена."); return; }
-
-        Console.Write($"Удалить категорию '{cat.CategoryName}'? (yes/no): ");
-        if (Console.ReadLine().ToLower() == "yes")
-        {
-            if (_moduleCategoryRepository.Delete(id)) Console.WriteLine("Категория удалена.");
-            else Console.WriteLine("Ошибка при удалении или категория не найдена.");
-        }
-        else { Console.WriteLine("Удаление отменено."); }
-    }
-
-
-    // --- УПРАВЛЕНИЕ ТЕГАМИ (ДЛЯ МОДЕРАТОРА) ---
-
-    static void ManageTagsMenu()
-    {
-        while (true)
-        {
-            Console.WriteLine("\n--- Управление тегами ---");
-            Console.WriteLine("1. Показать все теги");
-            Console.WriteLine("2. Добавить новый тег");
-            Console.WriteLine("3. Редактировать тег");
-            Console.WriteLine("4. Удалить тег");
-            Console.WriteLine("0. Назад в главное меню");
-            Console.Write("Выберите опцию: ");
-            string choice = Console.ReadLine();
-
-            switch (choice)
-            {
-                case "1": ListAllTags(); break;
-                case "2": AddNewTag(); break;
-                case "3": EditTag(); break;
-                case "4": DeleteGlobalTag(); break;
-                case "0": return;
-                default: Console.WriteLine("Неверный ввод."); break;
-            }
-        }
-    }
-
-    static void ListAllTags()
-    {
-        var tags = _tagRepository.GetAll();
-        if (!tags.Any()) { Console.WriteLine("Тегов нет."); return; }
-        Console.WriteLine("\n--- Список тегов ---");
-        foreach (var t in tags) { Console.WriteLine($"ID: {t.TagID}, Название: {t.TagName}"); }
-    }
-    static void AddNewTag()
-    {
-        Console.Write("Название нового тега: "); string name = Console.ReadLine();
-        if (string.IsNullOrWhiteSpace(name)) { Console.WriteLine("Название не может быть пустым."); return; }
-        if (_tagRepository.GetByName(name) != null) { Console.WriteLine("Тег с таким названием уже существует."); return; }
-        _tagRepository.Add(new Tag { TagName = name });
-        Console.WriteLine("Тег добавлен.");
-    }
-    static void EditTag()
-    {
-        ListAllTags();
-        Console.Write("ID тега для редактирования: ");
-        if (!int.TryParse(Console.ReadLine(), out int id)) { Console.WriteLine("Неверный ID."); return; }
-        var tag = _tagRepository.GetById(id);
-        if (tag == null) { Console.WriteLine("Тег не найден."); return; }
-
-        Console.Write($"Новое название для '{tag.TagName}' (Enter, чтобы не менять): "); string newName = Console.ReadLine();
-        if (!string.IsNullOrWhiteSpace(newName) && newName != tag.TagName)
-        {
-            if (_tagRepository.GetByName(newName) != null && _tagRepository.GetByName(newName).TagID != id)
-            { Console.WriteLine("Другой тег с таким названием уже существует."); return; }
-            tag.TagName = newName;
-            _tagRepository.Update(tag);
-            Console.WriteLine("Тег обновлен.");
-        }
-        else { Console.WriteLine("Нет изменений."); }
-    }
-    static void DeleteGlobalTag() // Переименовано
-    {
-        ListAllTags();
-        Console.Write("ID тега для удаления: ");
-        if (!int.TryParse(Console.ReadLine(), out int id)) { Console.WriteLine("Неверный ID."); return; }
-        var tag = _tagRepository.GetById(id);
-        if (tag == null) { Console.WriteLine("Тег не найден."); return; }
-
-        if (_tagRepository.IsTagInUse(id))
-        { Console.WriteLine($"Тег '{tag.TagName}' используется модулями и не может быть удален."); return; }
-
-        Console.Write($"Удалить тег '{tag.TagName}'? (yes/no): ");
-        if (Console.ReadLine().ToLower() == "yes")
-        {
-            if (_tagRepository.Delete(id)) Console.WriteLine("Тег удален.");
-            else Console.WriteLine("Ошибка при удалении или тег не найден.");
+            await ExecuteServiceLogicAsync(
+                async () => {
+                    await _moderationService.DeleteCategoryAsync(categoryId);
+                },
+                $"Категория ID {categoryId} удалена (если она не использовалась)."
+            );
         }
         else { Console.WriteLine("Удаление отменено."); }
     }
 
-    static void ViewAllModules()
+    static async Task ManageGlobalTagsMenuUIAsync()
     {
-        var modules = _moduleRepository.GetAllModulesWithAuthorAndCategory();
-        if (!modules.Any()) { Console.WriteLine("Модулей пока нет."); return; }
-        Console.WriteLine("\n--- Список модулей ---");
-        foreach (var m in modules)
-        {
-            Console.WriteLine($"ID: {m.ModuleID}, Название: {m.Name}, Автор: {m.Author?.Username ?? "N/A"}, Категория: {m.Category?.CategoryName ?? "N/A"}, Верифицирован: {m.IsVerified}");
-        }
-    }
-
-    static void ViewModuleDetails()
-    {
-        Console.Write("Введите ID модуля для просмотра деталей: ");
-        if (!int.TryParse(Console.ReadLine(), out int moduleId)) { Console.WriteLine("Некорректный ID."); return; }
-
-        var module = _moduleRepository.GetModuleByIdWithDetails(moduleId);
-        if (module == null) { Console.WriteLine("Модуль не найден."); return; }
-
-        Console.WriteLine($"\n--- Детали модуля: {module.Name} (ID: {module.ModuleID}) ---");
-        Console.WriteLine($"Описание: {module.Description}");
-        Console.WriteLine($"Автор: {module.Author?.Username ?? "N/A"}");
-        Console.WriteLine($"Категория: {module.Category?.CategoryName ?? "N/A"}");
-        Console.WriteLine($"Верифицирован: {module.IsVerified}");
-        Console.WriteLine($"Создан: {module.CreationDate}, Обновлен: {module.LastUpdateDate}");
-
-        if (module.Versions.Any())
-        {
-            Console.WriteLine("Версии:");
-            foreach (var v in module.Versions.OrderByDescending(v => v.UploadDate))
-            {
-                Console.WriteLine($"  - {v.VersionString} (ID: {v.VersionID}, Загружено: {v.UploadDate.ToShortDateString()})");
-                Console.WriteLine($"    Ссылка: {v.DownloadLink}");
-                if (!string.IsNullOrEmpty(v.Changelog)) Console.WriteLine($"    Изменения: {v.Changelog}");
-            }
-        }
-        else { Console.WriteLine("Версий нет."); }
-
-        var reviews = _reviewRepository.GetReviewsForModule(moduleId);
-        if (reviews.Any())
-        {
-            Console.WriteLine("Отзывы:");
-            foreach (var r in reviews)
-            {
-                Console.WriteLine($"  - {r.User?.Username ?? "Аноним"}: {r.Rating}/5 \"{r.CommentText ?? ""}\" ({r.ReviewDate.ToShortDateString()})");
-            }
-        }
-        else { Console.WriteLine("Отзывов нет."); }
-
-        if (module.ModuleTags.Any())
-        {
-            Console.WriteLine($"Теги: {string.Join(", ", module.ModuleTags.Select(mt => mt.Tag.TagName))}");
-        }
-        else { Console.WriteLine("Тегов нет."); }
-    }
-
-
-    // --- ПРОСТОЕ ХЭШИРОВАНИЕ (НЕ ДЛЯ ПРОДА!) ---
-    static string SimpleHashPassword(string password)
-    {
-        // ВНИМАНИЕ: Это НЕ безопасный способ хэширования. Используйте BCrypt.Net или Argon2.
-        using (SHA256 sha256Hash = SHA256.Create())
-        {
-            byte[] bytes = sha256Hash.ComputeHash(Encoding.UTF8.GetBytes(password));
-            StringBuilder builder = new StringBuilder();
-            for (int i = 0; i < bytes.Length; i++)
-            {
-                builder.Append(bytes[i].ToString("x2"));
-            }
-            return builder.ToString();
-        }
-    }
-
-    // --- РЕГИСТРАЦИЯ И ВХОД ---
-    static void RegisterUser()
-    {
-        Console.Write("Введите имя пользователя: "); string username = Console.ReadLine();
-        Console.Write("Введите email: "); string email = Console.ReadLine();
-        Console.Write("Введите пароль: "); string password = Console.ReadLine(); // TODO: Скрывать ввод
-
-        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(password))
-        { Console.WriteLine("Все поля обязательны."); return; }
-
-        if (_userRepository.GetUserByUsername(username) != null)
-        { Console.WriteLine("Пользователь с таким именем уже существует."); return; }
-        if (_userRepository.GetUserByEmail(email) != null)
-        { Console.WriteLine("Пользователь с таким email уже существует."); return; }
-
-        var defaultRole = _roleRepository.GetRoleByName("EndUser");
-        if (defaultRole == null)
-        {
-            defaultRole = _roleRepository.GetAllRoles().FirstOrDefault(); // Аварийный вариант
-            if (defaultRole == null) { Console.WriteLine("Ошибка: Роли не найдены."); return; }
-            Console.WriteLine($"Предупреждение: Роль 'EndUser' не найдена, назначена роль '{defaultRole.RoleName}'.");
-        }
-
-        var user = new User
-        {
-            Username = username,
-            Email = email,
-            PasswordHash = SimpleHashPassword(password),
-            RoleID = defaultRole.RoleID,
-            RegistrationDate = DateTime.UtcNow
-        };
-        _userRepository.AddUser(user);
-        Console.WriteLine("Регистрация успешна!");
-    }
-
-    static void LoginUser()
-    {
-        Console.Write("Введите имя пользователя: "); string username = Console.ReadLine();
-        Console.Write("Введите пароль: "); string password = Console.ReadLine();
-
-        var user = _userRepository.GetUserByUsernameWithRole(username);
-        if (user != null && user.PasswordHash == SimpleHashPassword(password))
-        {
-            _currentUser = user;
-            Console.WriteLine($"Вход успешен! Добро пожаловать, {user.Username}!");
-        }
-        else { Console.WriteLine("Неверное имя пользователя или пароль."); }
-    }
-
-    static void LogoutUser()
-    {
-        if (_currentUser != null) Console.WriteLine($"Пользователь {_currentUser.Username} вышел из системы.");
-        _currentUser = null;
-    }
-
-    static void SearchModuleByName()
-    {
-        Console.Write("Введите часть названия модуля для поиска: "); string searchTerm = Console.ReadLine();
-        if (string.IsNullOrWhiteSpace(searchTerm)) { Console.WriteLine("Запрос не может быть пустым."); return; }
-
-        var modules = _moduleRepository.SearchModulesByName(searchTerm);
-        if (!modules.Any()) { Console.WriteLine($"Модули по запросу '{searchTerm}' не найдены."); return; }
-        Console.WriteLine($"\n--- Результаты поиска по '{searchTerm}' ---");
-        foreach (var m in modules)
-        {
-            Console.WriteLine($"ID: {m.ModuleID}, Название: {m.Name}, Автор: {m.Author?.Username ?? "N/A"}, Категория: {m.Category?.CategoryName ?? "N/A"}");
-        }
-    }
-
-    static void AddReview()
-    {
-        if (_currentUser == null) { Console.WriteLine("Сначала войдите в систему."); return; }
-        ViewAllModules(); // Показать модули для выбора ID
-        Console.Write("Введите ID модуля для отзыва: ");
-        if (!int.TryParse(Console.ReadLine(), out int moduleId)) { Console.WriteLine("Некорректный ID модуля."); return; }
-
-        var module = _moduleRepository.GetModuleById(moduleId);
-        if (module == null) { Console.WriteLine("Модуль не найден."); return; }
-
-        Console.Write("Ваша оценка (1-5): ");
-        if (!int.TryParse(Console.ReadLine(), out int rating) || rating < 1 || rating > 5) { Console.WriteLine("Некорректная оценка."); return; }
-        Console.Write("Ваш комментарий: "); string comment = Console.ReadLine();
-
-        var review = new Review
-        {
-            ModuleID = moduleId,
-            UserID = _currentUser.UserID,
-            Rating = rating,
-            CommentText = comment,
-            ReviewDate = DateTime.UtcNow
-        };
-        _reviewRepository.Add(review);
-        Console.WriteLine("Отзыв успешно добавлен!");
-    }
-
-
-    static void ReportCompatibility()
-    {
-        if (_currentUser == null) { Console.WriteLine("Сначала войдите в систему."); return; }
-        // Сначала нужно выбрать модуль, потом версию
-        ViewAllModules();
-        Console.Write("Введите ID модуля, для версии которого хотите оставить отчет: ");
-        if (!int.TryParse(Console.ReadLine(), out int moduleIdSelect)) { Console.WriteLine("Некорректный ID модуля."); return; }
-        var moduleWithVersions = _moduleRepository.GetModuleByIdWithDetails(moduleIdSelect);
-        if (moduleWithVersions == null || !moduleWithVersions.Versions.Any()) { Console.WriteLine("Модуль не найден или у него нет версий."); return; }
-
-        Console.WriteLine("Доступные версии для модуля " + moduleWithVersions.Name + ":");
-        foreach (var v in moduleWithVersions.Versions) { Console.WriteLine($" ID Версии: {v.VersionID} - {v.VersionString}"); }
-
-        Console.Write("Введите ID версии модуля: ");
-        if (!int.TryParse(Console.ReadLine(), out int moduleVersionId)) { Console.WriteLine("Некорректный ID версии."); return; }
-
-        var moduleVersion = _moduleVersionRepository.GetById(moduleVersionId);
-        if (moduleVersion == null || moduleVersion.ModuleID != moduleIdSelect) { Console.WriteLine("Версия модуля не найдена или не принадлежит выбранному модулю."); return; }
-
-        Console.Write("Модель вашего устройства: "); string deviceModel = Console.ReadLine();
-        Console.Write("Версия Android: "); string androidVersion = Console.ReadLine();
-        Console.Write("Статус работы (Works/WorksWithIssues/DoesNotWork): "); string worksStatus = Console.ReadLine();
-        Console.Write("Дополнительные заметки (необязательно): "); string notes = Console.ReadLine();
-
-        if (string.IsNullOrWhiteSpace(deviceModel) || string.IsNullOrWhiteSpace(androidVersion) || string.IsNullOrWhiteSpace(worksStatus))
-        { Console.WriteLine("Модель, версия Android и статус должны быть заполнены."); return; }
-
-        var report = new CompatibilityReport
-        {
-            ModuleVersionID = moduleVersionId,
-            UserID = _currentUser.UserID,
-            DeviceModel = deviceModel,
-            AndroidVersion = androidVersion,
-            WorksStatus = worksStatus,
-            UserNotes = notes,
-            ReportDate = DateTime.UtcNow
-        };
-        _compatibilityReportRepository.Add(report);
-        Console.WriteLine("Отчет о совместимости успешно добавлен!");
-    }
-
-
-    // --- ДЕЙСТВИЯ ДЛЯ РАЗРАБОТЧИКА ---
-    static void UploadNewModule()
-    {
-        if (_currentUser?.Role?.RoleName != "Developer") { Console.WriteLine("Доступ запрещен."); return; }
-
-        Console.Write("Название нового модуля: "); string name = Console.ReadLine();
-        Console.Write("Описание модуля: "); string description = Console.ReadLine();
-
-        var categories = _moduleCategoryRepository.GetAll();
-        if (!categories.Any()) { Console.WriteLine("Категории не найдены. Модератор должен их добавить."); return; }
-        Console.WriteLine("Доступные категории:");
-        foreach (var cat in categories) { Console.WriteLine($"{cat.CategoryID}. {cat.CategoryName}"); }
-        Console.Write("Выберите ID категории: ");
-        if (!int.TryParse(Console.ReadLine(), out int categoryId) || !_moduleCategoryRepository.GetAll().Any(c => c.CategoryID == categoryId))
-        { Console.WriteLine("Некорректный ID категории."); return; }
-
-        Console.Write("Версия модуля (например, v1.0): "); string versionString = Console.ReadLine();
-        Console.Write("Ссылка на скачивание файла модуля: "); string downloadLink = Console.ReadLine();
-        Console.Write("Changelog (можно оставить пустым): "); string changelog = Console.ReadLine();
-
-        if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(description) || string.IsNullOrWhiteSpace(versionString) || string.IsNullOrWhiteSpace(downloadLink))
-        { Console.WriteLine("Название, описание, версия и ссылка на скачивание обязательны."); return; }
-
-        var newModule = new Module
-        {
-            Name = name,
-            Description = description,
-            AuthorUserID = _currentUser.UserID,
-            CategoryID = categoryId,
-            IsVerified = false,
-            CreationDate = DateTime.UtcNow,
-            LastUpdateDate = DateTime.UtcNow
-        };
-        var newVersion = new ModuleVersion // Module будет присвоен в AddModuleWithFirstVersion
-        {
-            VersionString = versionString,
-            DownloadLink = downloadLink,
-            Changelog = changelog,
-            UploadDate = DateTime.UtcNow
-        };
-
-        _moduleRepository.AddModuleWithFirstVersion(newModule, newVersion);
-        Console.WriteLine($"Модуль '{name}' и его версия '{versionString}' успешно загружены и ожидают верификации.");
-    }
-
-    static void AddVersionToMyModule()
-    {
-        if (_currentUser?.Role?.RoleName != "Developer") { Console.WriteLine("Доступ запрещен."); return; }
-        var myModules = _moduleRepository.GetModulesByAuthor(_currentUser.UserID);
-        if (!myModules.Any()) { Console.WriteLine("У вас пока нет загруженных модулей."); return; }
-
-        Console.WriteLine("Ваши модули:");
-        foreach (var mod in myModules) { Console.WriteLine($"ID: {mod.ModuleID}, Название: {mod.Name}"); }
-        Console.Write("Введите ID модуля для добавления версии: ");
-        if (!int.TryParse(Console.ReadLine(), out int moduleId) || !myModules.Any(m => m.ModuleID == moduleId))
-        { Console.WriteLine("Некорректный ID модуля или модуль вам не принадлежит."); return; }
-
-        Console.Write("Новая версия (например, v1.1): "); string versionString = Console.ReadLine();
-        Console.Write("Ссылка на скачивание: "); string downloadLink = Console.ReadLine();
-        Console.Write("Changelog: "); string changelog = Console.ReadLine();
-
-        if (string.IsNullOrWhiteSpace(versionString) || string.IsNullOrWhiteSpace(downloadLink))
-        { Console.WriteLine("Версия и ссылка на скачивание обязательны."); return; }
-
-        var newVersion = new ModuleVersion
-        {
-            ModuleID = moduleId,
-            VersionString = versionString,
-            DownloadLink = downloadLink,
-            Changelog = changelog,
-            UploadDate = DateTime.UtcNow
-        };
-        _moduleVersionRepository.Add(newVersion);
-
-        var moduleToUpdate = _moduleRepository.GetModuleById(moduleId); // Получаем для обновления даты
-        if (moduleToUpdate != null)
-        {
-            moduleToUpdate.LastUpdateDate = DateTime.UtcNow;
-            _moduleRepository.UpdateModule(moduleToUpdate);
-        }
-        Console.WriteLine($"Новая версия '{versionString}' для модуля ID {moduleId} успешно добавлена.");
-    }
-
-    static void ViewMyModules()
-    {
-        if (_currentUser?.Role?.RoleName != "Developer") { Console.WriteLine("Доступ запрещен."); return; }
-        var myModules = _moduleRepository.GetModulesByAuthor(_currentUser.UserID); // GetModulesByAuthor уже включает версии
-        if (!myModules.Any()) { Console.WriteLine("У вас пока нет загруженных модулей."); return; }
-
-        Console.WriteLine("\n--- Ваши модули ---");
-        foreach (var mod in myModules)
-        {
-            Console.WriteLine($"ID: {mod.ModuleID}, Название: {mod.Name}, Категория: {mod.Category?.CategoryName ?? "N/A"}, Верифицирован: {mod.IsVerified}");
-            if (mod.Versions.Any())
-            {
-                Console.WriteLine("  Версии:");
-                foreach (var ver in mod.Versions.OrderByDescending(v => v.UploadDate))
-                { Console.WriteLine($"    - {ver.VersionString} (Загружено: {ver.UploadDate.ToShortDateString()})"); }
-            }
-            else { Console.WriteLine("  (Версий нет)"); }
-        }
-    }
-
-    static void ManageMyModuleTags()
-    {
-        if (_currentUser?.Role?.RoleName != "Developer") { Console.WriteLine("Доступ запрещен."); return; }
-        var myModules = _moduleRepository.GetModulesByAuthor(_currentUser.UserID);
-        if (!myModules.Any()) { Console.WriteLine("У вас нет модулей для управления тегами."); return; }
-
-        Console.WriteLine("Ваши модули:");
-        foreach (var mod in myModules) { Console.WriteLine($"ID: {mod.ModuleID} - {mod.Name}"); }
-        Console.Write("Введите ID модуля для управления тегами: ");
-        if (!int.TryParse(Console.ReadLine(), out int moduleId) || !myModules.Any(m => m.ModuleID == moduleId))
-        { Console.WriteLine("Неверный ID или модуль не ваш."); return; }
-
-        var moduleWithTags = _moduleRepository.GetModuleByIdWithDetails(moduleId); // Чтобы видеть текущие теги
-        Console.WriteLine($"Текущие теги для '{moduleWithTags.Name}': " +
-                          (moduleWithTags.ModuleTags.Any() ? string.Join(", ", moduleWithTags.ModuleTags.Select(mt => mt.Tag.TagName)) : "Нет"));
-
-        Console.WriteLine("1. Добавить тег к модулю");
-        Console.WriteLine("2. Удалить тег с модуля");
-        Console.Write("Выберите действие: ");
-        string choice = Console.ReadLine();
-
-        var allTags = _tagRepository.GetAll().ToList();
-        if (!allTags.Any()) { Console.WriteLine("В системе нет тегов. Модератор должен их добавить."); return; }
-
-        Console.WriteLine("Доступные теги в системе:");
-        foreach (var tag in allTags) { Console.WriteLine($"ID: {tag.TagID} - {tag.TagName}"); }
-
-        if (choice == "1")
-        {
-            Console.Write("Введите ID тега для добавления: ");
-            if (int.TryParse(Console.ReadLine(), out int tagIdAdd) && allTags.Any(t => t.TagID == tagIdAdd))
-            {
-                _moduleRepository.AddTagToModule(moduleId, tagIdAdd);
-                Console.WriteLine("Тег добавлен (если его еще не было).");
-            }
-            else { Console.WriteLine("Неверный ID тега."); }
-        }
-        else if (choice == "2")
-        {
-            Console.Write("Введите ID тега для удаления: ");
-            if (int.TryParse(Console.ReadLine(), out int tagIdRemove) && allTags.Any(t => t.TagID == tagIdRemove))
-            {
-                _moduleRepository.RemoveTagFromModule(moduleId, tagIdRemove);
-                Console.WriteLine("Тег удален (если он был).");
-            }
-            else { Console.WriteLine("Неверный ID тега."); }
-        }
-        else { Console.WriteLine("Неверный выбор."); }
-    }
-
-    // --- ДЕЙСТВИЯ ДЛЯ МОДЕРАТОРА ---
-    static void VerifyModule()
-    {
-        if (_currentUser?.Role?.RoleName != "Moderator") { Console.WriteLine("Доступ запрещен."); return; }
-        var unverifiedModules = _moduleRepository.GetUnverifiedModules();
-        if (!unverifiedModules.Any()) { Console.WriteLine("Нет модулей, ожидающих верификации."); return; }
-
-        Console.WriteLine("\n--- Модули, ожидающие верификации ---");
-        foreach (var mod in unverifiedModules) { Console.WriteLine($"ID: {mod.ModuleID}, Название: {mod.Name}, Автор: {mod.Author?.Username ?? "N/A"}"); }
-        Console.Write("Введите ID модуля для верификации (или 0 для отмены): ");
-        if (!int.TryParse(Console.ReadLine(), out int moduleId) || moduleId == 0) { return; }
-
-        var moduleToVerify = _moduleRepository.GetModuleById(moduleId); // Нам нужна отслеживаемая сущность
-        if (moduleToVerify == null || moduleToVerify.IsVerified)
-        { Console.WriteLine("Модуль не найден или уже верифицирован."); return; }
-
-        Console.Write($"Верифицировать модуль '{moduleToVerify.Name}'? (yes/no): ");
-        if (Console.ReadLine().ToLower() == "yes")
-        {
-            moduleToVerify.IsVerified = true;
-            moduleToVerify.LastUpdateDate = DateTime.UtcNow;
-            _moduleRepository.UpdateModule(moduleToVerify); // Передаем измененную сущность
-            Console.WriteLine($"Модуль '{moduleToVerify.Name}' успешно верифицирован.");
-        }
-        else { Console.WriteLine("Верификация отменена."); }
-    }
-
-    static void ManageGlobalTagsMenu() // Переименовано для ясности
-    {
-        if (_currentUser?.Role?.RoleName != "Moderator") { Console.WriteLine("Доступ запрещен."); return; }
         while (true)
         {
             Console.WriteLine("\n--- Управление тегами (Глобально) ---");
@@ -1102,18 +1036,73 @@ class Program
             Console.WriteLine("2. Добавить новый тег");
             Console.WriteLine("3. Редактировать тег");
             Console.WriteLine("4. Удалить тег");
-            Console.WriteLine("0. Назад");
-            Console.Write("Выберите опцию: "); string choice = Console.ReadLine();
+            Console.WriteLine("0. Назад в главное меню");
+            Console.Write("Ваш выбор: ");
+            string choice = Console.ReadLine();
+
             switch (choice)
             {
-                case "1": ListAllTags(); break;
-                case "2": AddNewTag(); break;
-                case "3": EditTag(); break;
-                case "4": DeleteGlobalTag(); break; // Переименовано для ясности
-                case "0": return;
-                default: Console.WriteLine("Неверный ввод."); break;
+                case "1": await ListAllGlobalTagsUIAsync(); break;
+                case "2": await AddNewGlobalTagUIAsync(); break;
+                case "3": await EditGlobalTagUIAsync(); break;
+                case "4": await DeleteGlobalTagUIAsync(); break;
+                case "0": Console.Clear(); return;
+                default: Console.WriteLine("Неверный выбор."); break;
             }
         }
     }
+    static async Task ListAllGlobalTagsUIAsync()
+    {
+        Console.WriteLine("\n--- Список всех тегов ---");
+        await ExecuteServiceLogicAsync(
+            async () => {
+                var tags = await _moderationService.GetAllTagsAsync();
+                if (!tags.Any()) { Console.WriteLine("Тегов нет."); return; }
+                tags.ToList().ForEach(t => Console.WriteLine($"ID: {t.TagID} - {t.TagName}"));
+            }, null
+        );
+    }
+    static async Task AddNewGlobalTagUIAsync()
+    {
+        Console.WriteLine("\n--- Добавление нового тега ---");
+        string name = ReadNonEmptyLine("Название тега: ");
+        await ExecuteServiceLogicAsync(
+            async () => {
+                var tag = await _moderationService.AddTagAsync(name);
+                Console.WriteLine($"Тег '{tag.TagName}' (ID: {tag.TagID}) добавлен.");
+            }, null
+        );
+    }
+    static async Task EditGlobalTagUIAsync()
+    {
+        Console.WriteLine("\n--- Редактирование тега ---");
+        await ListAllGlobalTagsUIAsync();
+        int tagId = ReadInt("Введите ID тега для редактирования: ", 1);
+        string newName = ReadNonEmptyLine("Новое название тега: ");
+        await ExecuteServiceLogicAsync(
+           async () => {
+               var tag = await _moderationService.UpdateTagAsync(tagId, newName);
+               Console.WriteLine($"Тег ID {tag.TagID} обновлен на '{tag.TagName}'.");
+           }, null
+       );
+    }
+    static async Task DeleteGlobalTagUIAsync()
+    {
+        Console.WriteLine("\n--- Удаление тега ---");
+        await ListAllGlobalTagsUIAsync();
+        int tagId = ReadInt("Введите ID тега для удаления: ", 1);
+        Console.Write($"Вы уверены, что хотите удалить тег ID {tagId}? (yes/no): ");
+        if (ReadNonEmptyLine("").ToLower() == "yes")
+        {
+            await ExecuteServiceLogicAsync(
+                async () => {
+                    await _moderationService.DeleteTagAsync(tagId);
+                },
+                $"Тег ID {tagId} удален (если он не использовался)."
+            );
+        }
+        else { Console.WriteLine("Удаление отменено."); }
+    }
+
 }
 

@@ -12,7 +12,35 @@ namespace Magisk_DB.DataAcess
     public class ModuleRepository : IModuleRepository
     {
         private readonly IDbContextFactory<MagiskHubContext> _contextFactory;
-        public ModuleRepository(IDbContextFactory<MagiskHubContext> contextFactory) { _contextFactory = contextFactory; }
+
+        public ModuleRepository(IDbContextFactory<MagiskHubContext> contextFactory)
+        {
+            _contextFactory = contextFactory;
+        }
+
+        public async Task AddModuleAsync(Module module) // Изменили сигнатуру
+        {
+            await using var context = await _contextFactory.CreateDbContextAsync();
+            try
+            {
+                // Если module.Versions содержит ModuleVersion, EF Core добавит их вместе
+                // и автоматически установит ModuleId для ModuleVersion после сохранения Module.
+                await context.Modules.AddAsync(module);
+                await context.SaveChangesAsync();
+            }
+            catch (DbUpdateException ex)
+            {
+                // Здесь можно логировать ex.ToString() для полной информации
+                throw new DataAccessException($"Ошибка при добавлении модуля '{module.Name}' в БД.", ex);
+            }
+        }
+
+        public async Task<Module> GetModuleByNameAsync(string name)
+        {
+            await using var context = await _contextFactory.CreateDbContextAsync();
+            return await context.Modules.AsNoTracking()
+                               .FirstOrDefaultAsync(m => m.Name.ToLower() == name.ToLower());
+        }
 
         public Module GetModuleById(int moduleId)
         {

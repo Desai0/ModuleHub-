@@ -19,5 +19,7 @@ namespace Magisk_DB.IDataAcess
         void UpdateModule(Module module); // Для IsVerified, LastUpdateDate
         void AddTagToModule(int moduleId, int tagId); // Для управления тегами модуля
         void RemoveTagFromModule(int moduleId, int tagId);
+        Task AddModuleAsync(Module module); // Изменили с AddModuleWithVersionAsync
+        Task<Module> GetModuleByNameAsync(string name); // Для проверки уникальности
     }
 }
